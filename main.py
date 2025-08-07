@@ -4,12 +4,10 @@ import os
 import sys
 import time
 import threading
-import getpass
 from typing import List, Optional
 from scapy.all import *
 from netaddr import IPNetwork, IPAddress
 from cryptography.fernet import Fernet
-from datetime import datetime
 
 # Configure logging
 logging.basicConfig(
@@ -113,11 +111,13 @@ class PacketCrafter:
         """
         elapsed = time.time() - start_time
         if elapsed > 0 and packets_sent / elapsed > self.rate_limit:
-            logging.warning("Rate limit exceeded. Pausing transmission.")
-            time.sleep(1)
+            sleep_time = (packets_sent / self.rate_limit) - elapsed
+            if sleep_time > 0:
+                logging.warning(f"Rate limit exceeded. Pausing for {sleep_time:.2f} seconds.")
+                time.sleep(sleep_time)
 
     def craft_tcp_packet(self, src_ip: str, dst_ip: str, src_port: int, dst_port: int, 
-                        payload: str, flags: str = "S", iface: Optional[str] = None) -> Packet:
+                        payload: str, flags: str = "S") -> Packet:
         """Craft a TCP packet with specified parameters.
         
         Args:
@@ -127,7 +127,6 @@ class PacketCrafter:
             dst_port: Destination port
             payload: Packet payload
             flags: TCP flags (e.g., 'S' for SYN)
-            iface: Network interface
         Returns:
             Packet: Scapy TCP packet
         Ethical Note: Ensure explicit permission for spoofing and destination.
@@ -143,7 +142,7 @@ class PacketCrafter:
             raise
 
     def craft_udp_packet(self, src_ip: str, dst_ip: str, src_port: int, dst_port: int, 
-                        payload: str, iface: Optional[str] = None) -> Packet:
+                        payload: str) -> Packet:
         """Craft a UDP packet with specified parameters.
         
         Args:
@@ -152,7 +151,6 @@ class PacketCrafter:
             src_port: Source port
             dst_port: Destination port
             payload: Packet payload
-            iface: Network interface
         Returns:
             Packet: Scapy UDP packet
         Ethical Note: Ensure explicit permission for spoofing and destination.
@@ -167,15 +165,13 @@ class PacketCrafter:
             logging.error(f"UDP packet crafting error: {str(e)}")
             raise
 
-    def craft_icmp_packet(self, src_ip: str, dst_ip: str, payload: str, 
-                         iface: Optional[str] = None) -> Packet:
+    def craft_icmp_packet(self, src_ip: str, dst_ip: str, payload: str) -> Packet:
         """Craft an ICMP packet with specified parameters.
         
         Args:
             src_ip: Source IP address
             dst_ip: Destination IP address
             payload: Packet payload
-            iface: Network interface
         Returns:
             Packet: Scapy ICMP packet
         Ethical Note: ICMP can be used for network scanning; ensure authorized use.
@@ -190,15 +186,12 @@ class PacketCrafter:
             logging.error(f"ICMP packet crafting error: {str(e)}")
             raise
 
-    def send_packets(self, packets: List[Packet], count: int = 1, 
-                    interval: float = 0.1, iface: Optional[str] = None) -> None:
+    def send_packets(self, packets: List[Packet], count: int = 1) -> None:
         """Send packets with rate limiting and logging.
         
         Args:
             packets: List of Scapy packets
             count: Number of times to send each packet
-            interval: Interval between packets (seconds)
-            iface: Network interface
         Ethical Note: Rate limiting prevents network overload; confirm permission.
         """
         if not self.authenticated:
@@ -211,23 +204,18 @@ class PacketCrafter:
         def send_packet(packet: Packet) -> None:
             nonlocal packets_sent
             try:
-                send(packet, iface=iface, verbose=False)
+                send(packet, verbose=False)  # Removed iface parameter to avoid warning
                 packets_sent += 1
                 self._rate_limiter(packets_sent, start_time)
                 logging.info(f"Sent packet: {packet.summary()}")
             except Exception as e:
                 logging.error(f"Packet sending error: {str(e)}")
+                raise
 
-        threads = []
+        # Use a single thread to send packets as fast as possible within rate limit
         for _ in range(count):
             for packet in packets:
-                thread = threading.Thread(target=send_packet, args=(packet,))
-                threads.append(thread)
-                thread.start()
-                time.sleep(interval)
-        
-        for thread in threads:
-            thread.join()
+                send_packet(packet)
 
 def main():
     """Main function to parse arguments and execute packet crafting."""
@@ -239,8 +227,6 @@ def main():
     parser.add_argument("--payload", default="TestPayload", help="Packet payload")
     parser.add_argument("--protocol", choices=["tcp", "udp", "icmp"], default="tcp", help="Protocol type")
     parser.add_argument("--count", type=int, default=1, help="Number of packets to send")
-    parser.add_argument("--interval", type=float, default=0.1, help="Interval between packets")
-    parser.add_argument("--iface", help="Network interface")
     parser.add_argument("--whitelist", nargs="*", help="Allowed IP networks")
     parser.add_argument("--blacklist", nargs="*", help="Blocked IP networks")
     
@@ -259,15 +245,15 @@ def main():
     try:
         if args.protocol == "tcp":
             packet = crafter.craft_tcp_packet(
-                args.src_ip, args.dst_ip, args.src_port, args.dst_port, args.payload, iface=args.iface
+                args.src_ip, args.dst_ip, args.src_port, args.dst_port, args.payload
             )
         elif args.protocol == "udp":
             packet = crafter.craft_udp_packet(
-                args.src_ip, args.dst_ip, args.src_port, args.dst_port, args.payload, iface=args.iface
+                args.src_ip, args.dst_ip, args.src_port, args.dst_port, args.payload
             )
         else:
             packet = crafter.craft_icmp_packet(
-                args.src_ip, args.dst_ip, args.payload, iface=args.iface
+                args.src_ip, args.dst_ip, args.payload
             )
         
         # Confirm sensitive operation
@@ -278,7 +264,7 @@ def main():
             sys.exit(0)
         
         # Send packets
-        crafter.send_packets([packet], count=args.count, interval=args.interval, iface=args.iface)
+        crafter.send_packets([packet], count=args.count)
         print(f"Sent {args.count} packet(s) successfully.")
     
     except Exception as e:
